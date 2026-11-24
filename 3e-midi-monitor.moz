@@ -7,9 +7,9 @@
 // - Event types: Notes, CCs, Poly/Channel Aftertouch, Pitchbend, Program Changes, Sysex an other.
 // - Monitoring can be filtered by event type and MIDI channel.
 // - Event-specific formatted readout in aligned columns.
-// - In fullscreen mode 30 events are visible at the same time, scrolling is not possible.
 // - Clear Screen to focus on a specific MIDI context
 // - Show raw: Display the raw values of MIDI byte 1-3
+// - Show time: Display milliseconds since the last event of the same event type
 // - MIDI Thru: Incoming MIDI is piped to the output.
 // 
 // 3E, 2020-2026
@@ -17,36 +17,53 @@
 
 // Changelog 2024-05-19
 // - showRaw
-// - fixed an issue where FILTER_PROGRAM and FILTER_PITCHBEND were swapped
+// - fixed an issue where PAD_PROGRAM and PAD_PITCHBEND were swapped
+//
+// Changelog 2026-06-05
+// - show time
+// - fixed formatting issues
+//
+// Changelog 2026-06-13
+// - fixed fp overflow on curMillis
+// - Labeled pad Aftertouch (Ch) to Channel Pressure
 
+// Changelog 2026-11-20
+// - improved column layout on Log Screen
+ 
 
 @OnLoad
-    COLOR_WHITE   = 0 
-    COLOR_RED     = 1 
-    COLOR_YELLOW  = 2 
-    COLOR_GREEN   = 3 
-    COLOR_BLUE    = 4 
-    COLOR_PURPLE  = 5 
-    COLOR_VIOLET  = 6
-    COLOR_MAGENTA = 7 
+    COLOR_WHITE     = 0 
+    COLOR_RED       = 1 
+    COLOR_YELLOW    = 2 
+    COLOR_GREEN     = 3 
+    COLOR_BLUE      = 4 
+    COLOR_PURPLE    = 5 
+    COLOR_VIOLET    = 6
+    COLOR_MAGENTA   = 7 
 
-    FILTER_NOTE_ON    = 0
-    FILTER_NOTE_OFF   = 1
-    FILTER_CONTROL    = 2
-    FILTER_AFTERTOUCH = 3
-    FILTER_CHANPRESS  = 4
-    FILTER_PITCHBEND  = 5
-    FILTER_PROGRAM    = 6
-    FILTER_SYSEX      = 7
-    FILTER_OTHER      = 8
+    PAD_NOTE_ON     = 0
+    PAD_NOTE_OFF    = 1
+    PAD_CC          = 2
+    PAD_AFTERTOUCH  = 3
+    PAD_CHANPRESS   = 4
+    PAD_PITCHBEND   = 5
+    PAD_PROGRAM     = 6
+    PAD_SYSEX       = 7
+    PAD_OTHER       = 8
+    PAD_TOGGLE_THRU = 12
+    PAD_SHOW_RAW    = 13
+    PAD_SHOW_TIME   = 14
+    PAD_CLEAR       = 15
 
-    CHANNEL_OMNI      = -1
+    CHANNEL_OMNI    = -1
+    RESET_TIME      = 3600000
 
     if Unassigned filters
         filters  = [1,1,1,1, 1,1,1,1 ,1,1,1,1, 1,1,1,1]
         channel  = CHANNEL_OMNI
         sendThru = NO
         showRaw  = NO
+        showTime = YES
     endif
 
     ShowLayout 2     // 16-pad/4-knobs layout
@@ -55,39 +72,47 @@
     endfor
     SetShortName {MON}
 
-    LabelKnobs {Channel Filter}
-    LabelPads  {Event Filter}
-    LabelPad 0,  {Note On}
-    LabelPad 1,  {Note Off}
-    LabelPad 2,  {Control}
-    LabelPad 3,  {Aftertouch (Poly)}
-    LabelPad 4,  {Aftertouch (Channel)}
-    LabelPad 5,  {Pitchbend}
-    LabelPad 6,  {Program}
-    LabelPad 7,  {Sysex}
-    LabelPad 8,  {Other}
-    LabelPad 13, {Clear Screen}
-    LabelPad 14, {Show Raw}
-    LabelPad 15, {MIDI Thru}
+    LabelKnobs                {Channel Filter}
+    LabelPads                 {Event Filter}
+    LabelPad PAD_NOTE_ON,     {Note On}
+    LabelPad PAD_NOTE_OFF,    {Note Off}
+    LabelPad PAD_CC,          {CC}
+    LabelPad PAD_AFTERTOUCH,  {Poly      Pressure}
+    LabelPad PAD_CHANPRESS,   {Channel   Pressure}
+    LabelPad PAD_PITCHBEND,   {Pitchbend}
+    LabelPad PAD_PROGRAM,     {Program}
+    LabelPad PAD_SYSEX,       {Sysex}
+    LabelPad PAD_OTHER,       {Other}
+    LabelPad PAD_TOGGLE_THRU, {MIDI Thru}
+    LabelPad PAD_SHOW_RAW,    {Show Raw}
+    LabelPad PAD_SHOW_TIME,   {Show Time}
+    LabelPad PAD_CLEAR,       {Clear Screen}
 
     SetKnobValue 0, (TranslateScale channel+1, 0, 16, 0, 127)
     SetKnobValue 1, 0
     SetKnobValue 2, 0
     SetKnobValue 3, 0
     Call @UpdateUI
+
+    curMillis  = 0        // current milliseconds as counted by the timer
+    prevMillis = []       // previous timestamps for each MIDI event
+    SetTimerInterval 1
+    StartTimer    
 @End
 
 
 @OnPadDown
     pad = lastPad
-    if pad<=FILTER_OTHER
+    if pad<=PAD_OTHER
         filters[pad] = NOT filters[pad]
-    elseif pad=13
-        Call @ClearScreen
-    elseif pad=14
-        showRaw = NOT showRaw
-    elseif pad=15
+    elseif pad=PAD_TOGGLE_THRU
         sendThru = NOT sendThru
+    elseif pad=PAD_SHOW_RAW
+        showRaw = NOT showRaw
+    elseif pad=PAD_SHOW_TIME
+        showTime = NOT showTime
+    elseif pad=PAD_CLEAR
+        Call @ClearScreen
     endif
     Call @UpdateUI
 @End
@@ -105,24 +130,31 @@
 
 
 @UpdateUI
-    for i=0 to FILTER_OTHER
+    for i=0 to PAD_OTHER
         ColorPad i, COLOR_GREEN * filters[i]
     endfor
     
-    if showRaw=NO
-        LabelPad 14, {Show Raw              OFF}
-    else
-        LabelPad 14, {Show Raw              ON}
-    endif
-    ColorPad 14, COLOR_GREEN * showRaw
-    
     if sendThru=NO
-        LabelPad 15, {MIDI Thru             OFF}
+        LabelPad PAD_TOGGLE_THRU, {MIDI Thru             OFF}
     else
-        LabelPad 15, {MIDI Thru             ON}
+        LabelPad PAD_TOGGLE_THRU, {MIDI Thru             ON}
     endif
-    ColorPad 15, COLOR_GREEN * sendThru
+    ColorPad PAD_TOGGLE_THRU, COLOR_GREEN * sendThru
 
+    if showRaw=NO
+        LabelPad PAD_SHOW_RAW, {Show Raw             OFF}
+    else
+        LabelPad PAD_SHOW_RAW, {Show Raw             ON}
+    endif
+    ColorPad PAD_SHOW_RAW, COLOR_GREEN * showRaw
+
+    if showTime=NO
+        LabelPad PAD_SHOW_TIME, {Show Time              OFF}
+    else
+        LabelPad PAD_SHOW_TIME, {Show Time              ON}
+    endif
+    ColorPad PAD_SHOW_TIME, COLOR_GREEN * showTime
+    
     Call @UpdateKnobLabels
 @End
 
@@ -145,59 +177,181 @@
 
 @OnMIDIInput
     if channel=MIDIChannel OR channel=CHANNEL_OMNI
-
+        
         if MIDICommand=0x80 OR MIDICommand=0x90 OR MIDICommand=0xA0 OR MIDICommand=0xB0 OR MIDICommand=0xC0 OR MIDICommand=0xD0 OR MIDICommand=0xE0
-            if MIDICommand=0x90 AND filters[FILTER_NOTE_ON]
-                if showRaw=YES
-                    Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
-                else
-                    Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {  ch:}, MIDIChannel+1
-                endif
+            
+            // note-on --------------------------------------------------------------------------------------------------------------------------------
+            if MIDICommand=0x90 AND filters[PAD_NOTE_ON]
+                if showRaw=NO AND showTime=NO
+                    if MidiByte3 < 10
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1
+                    elseif MidiByte3 < 100
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1
+                    else
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1
+                    endif                    
+                elseif showRaw=YES AND showTime=NO
+                    if MidiByte3 < 10
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    elseif MidiByte3 < 100
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    else
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    endif                    
+                elseif showRaw=NO AND showTime=YES
+                    if MidiByte3 < 10
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    elseif MidiByte3 < 100
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    else
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    endif                    
+                elseif showRaw=YES AND showTime=YES
+                    if MidiByte3 < 10
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    elseif MidiByte3 < 100
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    else
+                        Log {Note On     }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    endif                    
+                endif 
+                prevMillis[PAD_NOTE_ON] = curMillis
 
-            elseif MIDICommand=0x80 AND filters[FILTER_NOTE_OFF]
-                if showRaw=YES
-                    Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
-                else
-                    Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {  ch:}, MIDIChannel+1
-                endif
+            // note-off --------------------------------------------------------------------------------------------------------------------------------
+            elseif MIDICommand=0x80 AND filters[PAD_NOTE_OFF]
+                if showRaw=NO AND showTime=NO
+                    if MidiByte3 < 10
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1
+                    elseif MidiByte3 < 100
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1
+                    else
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1
+                    endif                    
+                elseif showRaw=YES AND showTime=NO
+                    if MidiByte3 < 10
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    elseif MidiByte3 < 100
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    else
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    endif                    
+                elseif showRaw=NO AND showTime=YES
+                    if MidiByte3 < 10
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    elseif MidiByte3 < 100
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    else
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    endif                    
+                elseif showRaw=YES AND showTime=YES
+                    if MidiByte3 < 10
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {     ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    elseif MidiByte3 < 100
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    else
+                        Log {Note Off    }, (NoteName MIDIByte2, 1), { (}, MIDIByte2, {)}, {  vel:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_NOTE_ON])
+                    endif                    
+                endif 
+                prevMillis[PAD_NOTE_ON] = curMillis
 
-            elseif MIDICommand=0xB0 AND filters[FILTER_CONTROL]
-                if showRaw=YES
-                    Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
-                else
-                    Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {  ch:}, MIDIChannel+1
-                endif
+            // cc --------------------------------------------------------------------------------------------------------------------------------
+            elseif MIDICommand=0xB0 AND filters[PAD_CC]
+                if showRaw=NO AND showTime=NO
+                    if MidiByte3 < 10
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {    ch:}, MIDIChannel+1
+                    elseif MidiByte3 < 100
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {   ch:}, MIDIChannel+1
+                    else
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {  ch:}, MIDIChannel+1
+                    endif                    
+                elseif showRaw=YES AND showTime=NO
+                    if MidiByte3 < 10
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    elseif MidiByte3 < 100
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {   ch:}, MIDIChannel+1,  {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    else
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {  ch:}, MIDIChannel+1,   {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+                    endif                    
+                elseif showRaw=NO AND showTime=YES
+                    if MidiByte3 < 10
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_CC])
+                    elseif MidiByte3 < 100
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_CC])
+                    else
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_CC])
+                    endif                    
+                elseif showRaw=YES AND showTime=YES
+                    if MidiByte3 < 10
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {    ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_CC])
+                    elseif MidiByte3 < 100
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {   ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_CC])
+                    else
+                        Log {CC          }, MIDIByte2, {       data:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_CC])
+                    endif                    
+                endif 
+                prevMillis[PAD_CC] = curMillis
 
-            elseif MIDICommand=0xA0 AND filters[FILTER_AFTERTOUCH]
-                if showRaw=YES
-                    Log {Poly Press  }, MIDIByte2, {       data: -          }, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
-                else
-                    Log {Poly Press  }, MIDIByte2, {       data: -          }, {  ch:}, MIDIChannel+1
-                endif
+            // aftertouch --------------------------------------------------------------------------------------------------------------------------------
+            elseif MIDICommand=0xA0 AND filters[PAD_AFTERTOUCH]
+                if showRaw=NO AND showTime=NO
+                    Log {Poly Press  }, MIDIByte2, {  ch:}, MIDIChannel+1
+                elseif showRaw=YES AND showTime=NO
+                    Log {Poly Press  }, MIDIByte2, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
+                elseif showRaw=NO AND showTime=YES
+                    Log {Poly Press  }, MIDIByte2, {  ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_AFTERTOUCH])
+                elseif showRaw=YES AND showTime=YES
+                    Log {Poly Press  }, MIDIByte2, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {  ms:}, (curMillis - prevMillis[PAD_AFTERTOUCH])
+                endif 
+                prevMillis[PAD_AFTERTOUCH] = curMillis
 
-            elseif MIDICommand=0xD0 AND filters[FILTER_CHANPRESS]
-                if showRaw=YES
-                    Log {Chan Press  }, MIDIByte2, {       data: -          }, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
-                else
-                    Log {Chan Press  }, MIDIByte2, {       data: -          }, {  ch:}, MIDIChannel+1
-                endif
+            // chanpress --------------------------------------------------------------------------------------------------------------------------------
+            elseif MIDICommand=0xD0 AND filters[PAD_CHANPRESS]
+                if showRaw=NO AND showTime=NO
+                    Log {Chan Press  }, MIDIByte2, {  ch:}, MIDIChannel+1
+                elseif showRaw=YES AND showTime=NO
+                    Log {Chan Press  }, MIDIByte2, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
+                elseif showRaw=NO AND showTime=YES
+                    Log {Chan Press  }, MIDIByte2, {  ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_CHANPRESS])
+                elseif showRaw=YES AND showTime=YES
+                    Log {Chan Press  }, MIDIByte2, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {  ms:}, (curMillis - prevMillis[PAD_CHANPRESS])
+                endif 
+                prevMillis[PAD_CHANPRESS] = curMillis
 
-            elseif MIDICommand=0xC0 AND filters[FILTER_PROGRAM]
-                if showRaw=YES
-                    Log {Program     }, MIDIByte2, {       data: -          }, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
-                else
-                    Log {Program     }, MIDIByte2, {       data: -          }, {  ch:}, MIDIChannel+1
-                endif
+            // pc --------------------------------------------------------------------------------------------------------------------------------
+            elseif MIDICommand=0xC0 AND filters[PAD_PROGRAM]
+                if showRaw=NO AND showTime=NO
+                    Log {Program     }, MIDIByte2, {  ch:}, MIDIChannel+1
+                elseif showRaw=YES AND showTime=NO
+                    Log {Program     }, MIDIByte2, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
+                elseif showRaw=NO AND showTime=YES
+                    Log {Program     }, MIDIByte2, {  ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_PROGRAM])
+                elseif showRaw=YES AND showTime=YES
+                    Log {Program     }, MIDIByte2, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {  ms:}, (curMillis - prevMillis[PAD_PROGRAM])
+                endif 
+                prevMillis[PAD_PROGRAM] = curMillis
 
-            elseif MIDICommand=0xE0 AND filters[FILTER_PITCHBEND]
-                if showRaw=YES
-                    Log {Pitch Bend  }, MIDIByte2, {       val:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
-                else
+            // pb --------------------------------------------------------------------------------------------------------------------------------
+            elseif MIDICommand=0xE0 AND filters[PAD_PITCHBEND]
+                if showRaw=NO AND showTime=NO
                     Log {Pitch Bend  }, MIDIByte2, {       val:}, MIDIByte3, {  ch:}, MIDIChannel+1
-                endif
+                elseif showRaw=YES AND showTime=NO
+                    Log {Pitch Bend  }, MIDIByte2, {       val:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2
+                elseif showRaw=NO AND showTime=YES
+                    Log {Pitch Bend  }, MIDIByte2, {       val:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  ms:}, (curMillis - prevMillis[PAD_PITCHBEND])
+                elseif showRaw=YES AND showTime=YES
+                    Log {Pitch Bend  }, MIDIByte2, {       val:}, MIDIByte3, {  ch:}, MIDIChannel+1, {  raw:}, MIDIByte1, {-}, MIDIByte2, {  ms:}, (curMillis - prevMillis[PAD_PITCHBEND])
+                endif 
+                prevMillis[PAD_PITCHBEND] = curMillis
             endif
-        elseif filters[FILTER_OTHER]
-            Log {Other raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+
+        // other --------------------------------------------------------------------------------------------------------------------------------
+        elseif filters[PAD_OTHER]
+            if showTime=NO
+                Log {Other       raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3
+            else
+                Log {Other       raw:}, MIDIByte1, {-}, MIDIByte2, {-}, MIDIByte3, {  ms:}, (curMillis - prevMillis[PAD_OTHER])
+            endif 
+            prevMillis[PAD_OTHER] = curMillis
         endif
     endif
 
@@ -208,37 +362,76 @@
 
 
 @OnSysex
-    if filters[FILTER_SYSEX]
+    if filters[PAD_SYSEX]
         ReceiveSysex data
         length = SysexSize
 
-        if length=1
-            Log {Sysex len:}, length, { data:}, data[0]
-        elseif length=2
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1]
-        elseif length=3
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2]
-        elseif length=4
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3]
-        elseif length=5
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4]
-        elseif length=6
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5]
-        elseif length=7
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6]
-        elseif length=8
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7]
-        elseif length=9
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8]
-        elseif length=10
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8], {,}, data[9]
-        elseif length>10
-            Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8], {,}, data[9], {,}, data[10], {, (...)}
+        if showTime=NO
+            if length=1
+                Log {Sysex len:}, length, { data:}, data[0]
+            elseif length=2
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1]
+            elseif length=3
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2]
+            elseif length=4
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3]
+            elseif length=5
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4]
+            elseif length=6
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5]
+            elseif length=7
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6]
+            elseif length=8
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7]
+            elseif length=9
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8]
+            elseif length=10
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8], {,}, data[9]
+            elseif length>10
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8], {,}, data[9], {,}, data[10], {, (...)}
+            endif
+
+        else
+            if length=1
+                Log {Sysex len:}, length, { data:}, data[0], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=2
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=3
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=4
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=5
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=6
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=7
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=8
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=9
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length=10
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8], {,}, data[9], {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            elseif length>10
+                Log {Sysex len:}, length, { data:}, data[0], {,}, data[1], {,}, data[2], {,}, data[3], {,}, data[4], {,}, data[5], {,}, data[6], {,}, data[7], {,}, data[8], {,}, data[9], {,}, data[10], {, (...)}, {  ms:}, (curMillis - prevMillis[PAD_SYSEX])
+            endif
         endif
+
+        prevMillis[PAD_SYSEX] = curMillis
     endif
     
     if sendThru=YES
         SendMIDIThru
+    endif
+@End
+
+
+@OnTimer
+    curMillis = curMillis + 1
+
+    if curMillis>RESET_TIME             // approaching 32bit-FP overflow
+        curMillis = 0
+        FillArray prevMillis, 0
     endif
 @End
 
